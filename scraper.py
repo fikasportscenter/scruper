@@ -1,109 +1,49 @@
-import re
-from playwright.sync_api import sync_playwright
+import math
 
-def get_team_id(team_name):
-    """Helper to find team ID from a search page (simplified example)"""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto("https://www.flashscore.com/")
-        
-        # Search for team
-        page.fill('input[name="q"]', team_name)
-        page.keyboard.press("Enter")
-        
-        # Wait for results
-        try:
-            page.wait_for_selector('.table-container', timeout=5000)
-        except:
-            browser.close()
-            return None
-            
-        # Extract first match link
-        link = page.query_selector('a[href*="/team/"]').get_attribute('href')
-        browser.close()
-        
-        if link:
-            # Extract ID from URL like /team/manchester-united/abc123/
-            parts = link.split('/')
-            for part in parts:
-                if len(part) == 6 or len(part) == 8: # Typical ID length
-                    return part
+def poisson_probability(k, lambda_val):
+    """Calculate Poisson probability P(X=k)"""
+    return (lambda_val ** k) * math.exp(-lambda_val) / math.factorial(k)
+
+def predict_scoreline(home_stats, away_stats):
+    """
+    Predicts scoreline using Poisson distribution based on average goals.
+    """
+    if not home_stats or not away_stats:
         return None
 
-def scrape_last_5_matches(team_url):
-    """Scrapes the last 5 matches from a specific team's page on Flashscore"""
-    matches = []
+    # Simplified model: 
+    # Expected Goals Home = (Home Avg Scored + Away Avg Conceded) / 2
+    # Expected Goals Away = (Away Avg Scored + Home Avg Conceded) / 2
     
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        
-        # Assuming team_url is something like 'manchester-united'
-        url = f"https://www.flashscore.com/team/{team_url}/"
-        page.goto(url)
-        
-        # Wait for match history to load
-        try:
-            page.wait_for_selector('.match-row', timeout=10000)
-        except:
-            browser.close()
-            return []
-
-        # Scrape last 5 matches
-        rows = page.query_selector_all('.match-row')[:5]
-        
-        for row in rows:
-            try:
-                date = row.locator('.date').inner_text().strip()
-                opponent = row.locator('.name').inner_text().strip()
-                result = row.locator('.result').inner_text().strip()
+    lambda_home = (home_stats['avg_goals_scored'] + away_stats['avg_goals_conceded']) / 2
+    lambda_away = (away_stats['avg_goals_scored'] + home_stats['avg_goals_conceded']) / 2
+    
+    # Calculate probabilities for scores 0-5
+    prob_matrix = []
+    max_goals = 5
+    for i in range(max_goals + 1):
+        row = []
+        for j in range(max_goals + 1):
+            p_home = poisson_probability(i, lambda_home)
+            p_away = poisson_probability(j, lambda_away)
+            row.append(p_home * p_away)
+        prob_matrix.append(row)
+    
+    # Find most likely scoreline
+    best_score = None
+    max_prob = 0
+    
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            if prob_matrix[i][j] > max_prob:
+                max_prob = prob_matrix[i][j]
+                best_score = (i, j)
                 
-                # Parse score e.g., "2:1"
-                scores = re.findall(r'\d+', result)
-                if len(scores) >= 2:
-                    goals_scored = int(scores[0])
-                    goals_conceded = int(scores[1])
-                    
-                    # Determine if home or away based on URL context or additional selectors
-                    # Simplified: assume all scraped are relevant
-                    matches.append({
-                        'date': date,
-                        'opponent': opponent,
-                        'goals_scored': goals_scored,
-                        'goals_conceded': goals_conceded,
-                        'venue': 'Home' if 'home' in row.get_attribute('class') else 'Away'
-                    })
-            except Exception as e:
-                continue
-                
-        browser.close()
-    
-    return matches
-
-def fetch_stats_for_team(team_name):
-    """Main function to get stats for a team"""
-    # Step 1: Get Team ID/URL
-    team_id = get_team_id(team_name)
-    if not team_id:
-        return None
-        
-    # Step 2: Scrape Matches
-    matches = scrape_last_5_matches(team_id)
-    
-    # Step 3: Calculate Averages
-    if not matches:
-        return None
-        
-    total_scored = sum(m['goals_scored'] for m in matches)
-    total_conceded = sum(m['goals_conceded'] for m in matches)
-    
-    avg_scored = total_scored / 5
-    avg_conceded = total_conceded / 5
+    confidence = round(max_prob * 100, 1)
     
     return {
-        'team': team_name,
-        'matches': matches,
-        'avg_goals_scored': round(avg_scored, 2),
-        'avg_goals_conceded': round(avg_conceded, 2)
+        'predicted_score': f"{best_score[0]}-{best_score[1]}",
+        'confidence': f"{confidence}%",
+        'expected_goals_home': round(lambda_home, 2),
+        'expected_goals_away': round(lambda_away, 2)
     }
